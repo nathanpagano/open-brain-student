@@ -85,6 +85,7 @@
   .steps { font-size: 14px; color: var(--muted); line-height: 1.6; padding-left: 20px; margin-top: 8px; }
   .msg { font-size: 14px; margin-top: 12px; min-height: 1.2em; line-height: 1.45; }
   .msg.ok { color: var(--ok); }
+  .msg.warn { color: var(--warn); }
   .msg.err { color: var(--danger); }
 
   /* Voice */
@@ -191,34 +192,22 @@
     </div>
   </section>
 
-  <!-- YOUTUBE -->
+  <!-- YOUTUBE (Level 3: captured automatically on the server) -->
   <section class="panel" id="panel-youtube">
     <div class="card">
       <label for="ytUrl" style="margin-top:0">YouTube link</label>
       <input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=…">
-      <div class="row"><button class="btn" id="ytLoad">Load video</button></div>
+      <div class="row"><button class="btn" id="ytCapture">Capture video</button></div>
 
       <div class="yt-preview" id="ytPreview">
         <img id="ytThumb" alt="">
-        <div style="flex:1;min-width:0">
-          <label for="ytTitle" style="margin-top:0">Title</label>
-          <input id="ytTitle" type="text">
-        </div>
+        <div class="hint" id="ytInfo" style="flex:1;min-width:0"></div>
       </div>
 
-      <div id="ytSteps" style="display:none">
-        <div class="row"><a class="btn ghost" id="ytOpen" target="_blank" rel="noopener">Get transcript on YouTube</a></div>
-        <ol class="steps">
-          <li>On the video page, click the description under the video (it says <b>…more</b>).</li>
-          <li>Scroll to the bottom of the description and click <b>Show transcript</b>.</li>
-          <li>In the transcript panel, drag to select all the text, then copy it.</li>
-          <li>Come back here and paste it below. Timestamps are fine to leave in.</li>
-        </ol>
-        <p class="hint" style="margin-top:8px">This step is easier on a computer than a phone. In Level 3 it becomes automatic.</p>
-        <label for="ytTranscript">Transcript</label>
-        <textarea id="ytTranscript" placeholder="Paste the transcript here."></textarea>
-        <div class="row"><button class="btn" id="ytSave">Save video</button></div>
-      </div>
+      <p class="hint" style="margin-top:10px">
+        Paste a link and tap Capture. Your server fetches what was said in the video and saves it to your brain.
+        It usually takes 5 to 20 seconds.
+      </p>
       <div class="msg" id="ytMsg"></div>
     </div>
   </section>
@@ -245,18 +234,19 @@
     </div>
   </section>
 
-  <!-- URL -->
+  <!-- URL (Level 3: captured automatically on the server, paste kept as a backup) -->
   <section class="panel" id="panel-url">
     <div class="card">
       <label for="urlInput" style="margin-top:0">Page address</label>
       <input id="urlInput" type="url" placeholder="https://…">
+      <div class="row"><button class="btn" id="urlCapture">Capture page</button></div>
       <p class="hint" style="margin-top:10px">
-        Browsers don't let one website read another website's pages, so this app can't fetch the article for you yet.
-        Open the page, select the article text, copy it, and paste it below. Level 3 makes this automatic.
+        Your server fetches the page and saves its readable text. A few sites build their pages with JavaScript
+        or require a login, so the server sees nothing. For those, paste the text below and tap Save pasted text.
       </p>
-      <label for="urlText">Article text</label>
-      <textarea id="urlText" placeholder="Paste the article text here."></textarea>
-      <div class="row"><button class="btn" id="urlSave">Save article</button></div>
+      <label for="urlText">Article text (only if capture fails)</label>
+      <textarea id="urlText" placeholder="Optional: paste the article text here."></textarea>
+      <div class="row"><button class="btn ghost" id="urlSave">Save pasted text</button></div>
       <div class="msg" id="urlMsg"></div>
     </div>
   </section>
@@ -442,6 +432,24 @@ async function saveSource(thoughtId, text, kind) {
   }
 }
 
+// Level 3: asks one of your edge functions to capture a link ON THE SERVER,
+// where the browser's CORS rule does not apply. Supabase automatically sends
+// your login token along, so the function knows whose brain to save into.
+async function callCapture(fnName, url) {
+  const { data, error } = await sb.functions.invoke(fnName, { body: { url } });
+  if (error) {
+    // The function sends back a readable reason; dig it out if we can.
+    let message = error.message;
+    try {
+      const body = await error.context.json();
+      if (body && body.error) message = body.error;
+    } catch (e) { /* keep the generic message */ }
+    throw new Error(message);
+  }
+  if (!data || !data.ok) throw new Error((data && data.error) || 'Capture failed.');
+  return data;
+}
+
 /* ---------- Lists ---------- */
 function renderList(container, rows, emptyText) {
   container.innerHTML = '';
@@ -588,9 +596,7 @@ $('voiceSave').addEventListener('click', () => busy($('voiceSave'), 'Saving…',
   } catch (e) { setMsg($('voiceMsg'), 'Save failed: ' + e.message, 'err'); }
 }));
 
-/* ---------- YouTube ---------- */
-let currentVideoId = null;
-
+/* ---------- YouTube (Level 3: automatic) ---------- */
 function extractVideoId(input) {
   const raw = String(input || '').trim();
   if (/^[\w-]{11}$/.test(raw)) return raw;
@@ -608,46 +614,34 @@ function extractVideoId(input) {
   return null;
 }
 
-$('ytLoad').addEventListener('click', () => busy($('ytLoad'), 'Loading…', async () => {
+$('ytCapture').addEventListener('click', () => busy($('ytCapture'), 'Capturing…', async () => {
   const id = extractVideoId($('ytUrl').value);
   if (!id) return setMsg($('ytMsg'), 'That does not look like a YouTube link. Copy the address from the video page and try again.', 'err');
-  currentVideoId = id;
-  setMsg($('ytMsg'), '');
 
   $('ytThumb').src = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg';
-  $('ytOpen').href = 'https://www.youtube.com/watch?v=' + id;
-  $('ytTitle').value = '';
+  $('ytInfo').textContent = 'Fetching what was said in the video…';
   $('ytPreview').style.display = 'flex';
-  $('ytSteps').style.display = 'block';
+  setMsg($('ytMsg'), '');
 
   try {
-    const watchUrl = 'https://www.youtube.com/watch?v=' + id;
-    const res = await fetch('https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent(watchUrl));
-    if (!res.ok) throw new Error('oEmbed ' + res.status);
-    const info = await res.json();
-    $('ytTitle').value = decodeEntities(info.title || '');
-  } catch (e) {
-    $('ytTitle').placeholder = 'Could not fetch the title. Type it here.';
-  }
-}));
-
-$('ytSave').addEventListener('click', () => busy($('ytSave'), 'Saving…', async () => {
-  if (!currentVideoId) return setMsg($('ytMsg'), 'Load a video first.', 'err');
-  const transcript = decodeEntities($('ytTranscript').value).trim();
-  if (!transcript) return setMsg($('ytMsg'), 'Paste the transcript before saving.', 'err');
-  const title = decodeEntities($('ytTitle').value).trim() || 'Untitled video';
-  const link = 'https://www.youtube.com/watch?v=' + currentVideoId;
-  try {
-    const saved = await saveThought('📹 YouTube: ' + title + '\n' + link + '\n\n' + transcript, { video_id: currentVideoId });
-    await saveSource(saved.id, transcript, 'youtube_transcript');
+    const result = await callCapture('capture-youtube', 'https://www.youtube.com/watch?v=' + id);
+    const title = decodeEntities(result.title || 'Untitled video');
+    $('ytInfo').textContent = title;
+    if (result.has_transcript) {
+      setMsg($('ytMsg'),
+        'Saved ✓ "' + title + '": full transcript, ' + Number(result.chars || 0).toLocaleString() +
+        ' characters (via ' + result.fetched_via + ')', 'ok');
+    } else {
+      // Be honest when we only got the description, so it is never mistaken for a transcript.
+      setMsg($('ytMsg'),
+        'Saved "' + title + '", but no transcript was available, so only the video description was captured.', 'warn');
+    }
     $('ytUrl').value = '';
-    $('ytTranscript').value = '';
-    $('ytTitle').value = '';
+    loadRecent();
+  } catch (e) {
     $('ytPreview').style.display = 'none';
-    $('ytSteps').style.display = 'none';
-    currentVideoId = null;
-    setMsg($('ytMsg'), 'Saved ✓ "' + title + '"', 'ok');
-  } catch (e) { setMsg($('ytMsg'), 'Save failed: ' + e.message, 'err'); }
+    setMsg($('ytMsg'), 'Capture failed: ' + e.message, 'err');
+  }
 }));
 
 /* ---------- PDF ---------- */
@@ -732,14 +726,37 @@ $('pdfSave').addEventListener('click', () => busy($('pdfSave'), 'Saving…', asy
   } catch (e) { setMsg($('pdfMsg'), 'Save failed: ' + e.message, 'err'); }
 }));
 
-/* ---------- URL ---------- */
-$('urlSave').addEventListener('click', () => busy($('urlSave'), 'Saving…', async () => {
-  let raw = $('urlInput').value.trim();
-  const text = decodeEntities($('urlText').value).trim();
-  if (!raw) return setMsg($('urlMsg'), 'Enter the page address.', 'err');
+/* ---------- URL (Level 3: automatic, with paste as a backup) ---------- */
+function normaliseUrl(input) {
+  let raw = String(input || '').trim();
+  if (!raw) return null;
   if (!/^https?:\/\//i.test(raw)) raw = 'https://' + raw;
-  let url;
-  try { url = new URL(raw).href; } catch (e) { return setMsg($('urlMsg'), 'That address does not look right. Copy it from the browser bar and try again.', 'err'); }
+  try { return new URL(raw).href; } catch (e) { return null; }
+}
+
+$('urlCapture').addEventListener('click', () => busy($('urlCapture'), 'Capturing…', async () => {
+  if (!$('urlInput').value.trim()) return setMsg($('urlMsg'), 'Enter the page address.', 'err');
+  const url = normaliseUrl($('urlInput').value);
+  if (!url) return setMsg($('urlMsg'), 'That address does not look right. Copy it from the browser bar and try again.', 'err');
+  setMsg($('urlMsg'), 'Fetching the page…');
+  try {
+    const result = await callCapture('capture-url', url);
+    const title = decodeEntities(result.title || 'Untitled page');
+    setMsg($('urlMsg'),
+      'Saved ✓ "' + title + '" from ' + result.hostname + ' (' + Number(result.chars || 0).toLocaleString() + ' characters)', 'ok');
+    $('urlInput').value = '';
+    loadRecent();
+  } catch (e) {
+    setMsg($('urlMsg'), 'Capture failed: ' + e.message + ' You can paste the text below instead.', 'err');
+  }
+}));
+
+// Backup: save text the user pasted by hand (for pages the server cannot read).
+$('urlSave').addEventListener('click', () => busy($('urlSave'), 'Saving…', async () => {
+  const text = decodeEntities($('urlText').value).trim();
+  if (!$('urlInput').value.trim()) return setMsg($('urlMsg'), 'Enter the page address.', 'err');
+  const url = normaliseUrl($('urlInput').value);
+  if (!url) return setMsg($('urlMsg'), 'That address does not look right. Copy it from the browser bar and try again.', 'err');
   if (!text) return setMsg($('urlMsg'), 'Paste the article text before saving.', 'err');
   try {
     const saved = await saveThought('🔗 Web: ' + url + '\n\n' + text, { url });
